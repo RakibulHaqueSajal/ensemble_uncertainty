@@ -1,157 +1,151 @@
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.datasets import make_moons
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, log_loss
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.init as init
+import random
 
-# Set random seeds for reproducibility
-np.random.seed(42)
-torch.manual_seed(42)
+# ---------------------------
+# Data Generation and Preprocessing
+# ---------------------------
 
-# Generate synthetic data (binary classification)
+# Generate a 2D synthetic dataset (moons dataset)
 X, y = make_moons(n_samples=1000, noise=0.2, random_state=42)
-X = torch.tensor(X, dtype=torch.float32)
-y = torch.tensor(y, dtype=torch.float32).view(-1, 1)
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
 
-# ----------------------------
-# Concrete Dropout Module
-# ----------------------------
-class ConcreteDropout(nn.Module):
-    def __init__(self, layer, weight_regularizer, dropout_regularizer, init_dropout=0.1, temperature=0.1):
+# Convert training and test data to tensors
+X_train = torch.tensor(X_train, dtype=torch.float32)
+y_train = torch.tensor(y_train, dtype=torch.float32).view(-1, 1)
+X_test  = torch.tensor(X_test,  dtype=torch.float32)
+y_test  = torch.tensor(y_test,  dtype=torch.float32).view(-1, 1)
+
+# ---------------------------
+# Model and Initialization Functions
+# ---------------------------
+
+# New network with dropout layers added after each ReLU.
+class MCDropoutNN(nn.Module):
+    def __init__(self, input_dim=2, hidden_dims=[32, 16, 8], dropout_p=0.2, output_dim=1):
         """
-        Wraps a layer with Concrete Dropout.
-
-        Args:
-            layer: Underlying layer (e.g., nn.Linear).
-            weight_regularizer: Coefficient for weight regularization.
-            dropout_regularizer: Coefficient for dropout regularization.
-            init_dropout: Initial dropout probability.
-            temperature: Temperature parameter for the Concrete distribution.
+        hidden_dims: list of integers specifying the number of nodes in each hidden layer.
+        dropout_p: dropout probability (applied after each hidden layer).
         """
-        super(ConcreteDropout, self).__init__()
-        self.layer = layer
-        self.weight_regularizer = weight_regularizer
-        self.dropout_regularizer = dropout_regularizer
-        self.temperature = temperature
-        # Initialize dropout probability in logit space for learnability
-        self.logit_p = nn.Parameter(torch.log(torch.tensor(init_dropout)) - torch.log(torch.tensor(1.0 - init_dropout)))
-
+        super(MCDropoutNN, self).__init__()
+        layers = []
+        prev_dim = input_dim
+        # Create hidden layers with dropout
+        for h_dim in hidden_dims:
+            layers.append(nn.Linear(prev_dim, h_dim))
+            layers.append(nn.ReLU())
+            layers.append(nn.Dropout(p=dropout_p))  # Dropout layer
+            prev_dim = h_dim
+        
+        # Final output layer
+        layers.append(nn.Linear(prev_dim, output_dim))
+        layers.append(nn.Sigmoid())
+        
+        self.network = nn.Sequential(*layers)
+    
     def forward(self, x):
-        p = torch.sigmoid(self.logit_p)
-        eps = 1e-7
-        # Sample uniform noise
-        unif_noise = torch.rand_like(x)
-        # Compute dropout probability using the Concrete (Gumbel-Softmax) relaxation
-        drop_prob = (torch.log(p + eps) - torch.log(1 - p + eps) +
-                     torch.log(unif_noise + eps) - torch.log(1 - unif_noise + eps))
-        drop_prob = torch.sigmoid(drop_prob / self.temperature)
-        # Create dropout mask and scale the input to maintain expectation
-        random_tensor = 1 - drop_prob
-        x = x * random_tensor / (1 - p)
-        return self.layer(x)
+        return self.network(x)
 
-    def regularization_loss(self):
-        p = torch.sigmoid(self.logit_p)
-        weight = self.layer.weight
-        # Weight regularization: scales inversely with (1 - dropout probability)
-        weight_reg = self.weight_regularizer * torch.sum(weight ** 2) / (1 - p)
-        # Dropout regularization encourages p not to become too high or too low
-        dropout_reg = self.dropout_regularizer * (p * torch.log(p + 1e-7) +
-                                                    (1 - p) * torch.log(1 - p + 1e-7)) * weight.numel()
-        return weight_reg + dropout_reg
 
-# ----------------------------
-# Define the Network with Concrete Dropout
-# ----------------------------
-class ConcreteDropoutNet(nn.Module):
-    def __init__(self, input_dim=2, hidden_dim=32, weight_regularizer=1e-6, dropout_regularizer=1e-5):
-        super(ConcreteDropoutNet, self).__init__()
-        self.cd1 = ConcreteDropout(nn.Linear(input_dim, hidden_dim), weight_regularizer, dropout_regularizer)
-        self.cd2 = ConcreteDropout(nn.Linear(hidden_dim, hidden_dim), weight_regularizer, dropout_regularizer)
-        self.fc3 = nn.Linear(hidden_dim, 1)  # Final layer without dropout
-
-    def forward(self, x):
-        x = F.ReLU(self.cd1(x))  # Using ELU activation
-        x = F.ReLU(self.cd2(x))
-        x = torch.sigmoid(self.fc3(x))
-        return x
-
-    def regularization_loss(self):
-        return self.cd1.regularization_loss() + self.cd2.regularization_loss()
-
-# ----------------------------
-# Training Function
-# ----------------------------
-def train_concrete_dropout_model(model, X_train, y_train, epochs=100, lr=0.01):
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+def train_model(model, X_train, y_train, epochs=50, lr=0.001):
     criterion = nn.BCELoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=0.001)   
     model.train()
+    
+    epoch_losses = []
+    epoch_accuracies = []
     for epoch in range(epochs):
         optimizer.zero_grad()
-        outputs = model(X_train)
-        bce_loss = criterion(outputs, y_train)
-        reg_loss = model.regularization_loss()
-        loss = bce_loss + reg_loss
+        output = model(X_train)
+        loss = criterion(output, y_train)
         loss.backward()
         optimizer.step()
-        if (epoch + 1) % 20 == 0:
-            print(f"Epoch {epoch+1}, Total Loss: {loss.item():.4f}, BCE: {bce_loss.item():.4f}, Reg: {reg_loss.item():.4f}")
-    return model
+        
+        with torch.no_grad():
+            preds = (output > 0.5).float()
+            accuracy = (preds.eq(y_train)).float().mean().item()
+        epoch_losses.append(loss.item())
+        epoch_accuracies.append(accuracy)
+    return model, epoch_losses, epoch_accuracies
 
-# ----------------------------
-# Monte Carlo Sampling for Concrete Dropout
-# ----------------------------
-def concrete_predict(model, X, num_samples=100):
-    # Set model to training mode to activate dropout
-    model.train()
-    predictions = []
+
+
+def train_mc_model(epochs=50, lr=0.001, input_dim=2, hidden_dims=[32, 16, 8], dropout_p=0.2):
+    # Create one model with MC Dropout layers.
+    model = MCDropoutNN(input_dim=input_dim, hidden_dims=hidden_dims, dropout_p=dropout_p, output_dim=1)
+    trained_model, losses, accuracies = train_model(model, X_train, y_train, epochs=epochs, lr=lr)
+    print(f"Trained MC Dropout Model | Final Training Loss: {losses[-1]:.4f} | Final Training Accuracy: {accuracies[-1]:.4f}")
+    return trained_model, losses, accuracies
+
+# ---------------------------
+# Monte Carlo Dropout Prediction Function
+# ---------------------------
+
+def mc_dropout_predictions(model, X, T=100):
+    """
+    Perform T stochastic forward passes (with dropout active) and return the mean and variance of the predictions.
+    """
+    model.train()  # Force dropout to be active
+    preds = []
     with torch.no_grad():
-        for _ in range(num_samples):
-            predictions.append(model(X))
-    predictions = torch.stack(predictions)  # Shape: [num_samples, N, 1]
-    mean_pred = predictions.mean(dim=0)
-    var_pred = predictions.var(dim=0)
-    return mean_pred, var_pred
+        for _ in range(T):
+            preds.append(model(X).detach().numpy())
+    preds = np.array(preds)  # Shape: (T, N, 1)
+    preds_mean = preds.mean(axis=0)
+    preds_variance = preds.var(axis=0)
+    return preds_mean, preds_variance
 
-# ----------------------------
-# Train the Model
-# ----------------------------
-model_cd = ConcreteDropoutNet(input_dim=2, hidden_dim=32)
-trained_model_cd = train_concrete_dropout_model(model_cd, X_train, y_train, epochs=100, lr=0.01)
+# ---------------------------
+# Evaluation Functions
+# ---------------------------
 
-# Evaluate on test set
-trained_model_cd.eval()
-with torch.no_grad():
-    test_preds = (trained_model_cd(X_test) > 0.5).float()
-print("Test Accuracy:", accuracy_score(y_test.numpy(), test_preds.numpy()))
+def evaluate_mc_model(model, X, y, T=100, skip_nll=False):
+    preds_mean, preds_variance = mc_dropout_predictions(model, X, T=T)
+    acc = accuracy_score(y, preds_mean > 0.5)
+    nll = log_loss(y, preds_mean) if not skip_nll else None
+    return acc, nll, preds_mean, preds_variance
 
-# ----------------------------
-# Uncertainty Visualization on a Grid
-# ----------------------------
-# Create a grid over the input space
-x_min, x_max = X[:, 0].min().item() - 1, X[:, 0].max().item() + 1
-y_min, y_max = X[:, 1].min().item() - 1, X[:, 1].max().item() + 1
-xx, yy = np.meshgrid(np.linspace(x_min, x_max, 100),
-                     np.linspace(y_min, y_max, 100))
+# ---------------------------
+# Main Script: Train MC Dropout Model and Evaluate
+# ---------------------------
+
+# Train a single MC Dropout model on the moons dataset
+epochs = 100
+mc_model, train_losses, train_accuracies = train_mc_model(epochs=epochs, lr=0.001, input_dim=2, hidden_dims=[32,16,8], dropout_p=0.2)
+
+# Evaluate the MC Dropout model on the test set using T stochastic forward passes
+T = 100  # Number of MC samples
+test_acc, test_nll, test_preds_mean, test_preds_variance = evaluate_mc_model(mc_model, X_test, y_test, T=T)
+print(f"\nMC Dropout Evaluation | Test Accuracy: {test_acc:.4f} | Test NLL: {test_nll:.4f} | Mean Prediction Variance: {test_preds_variance.mean():.4f}")
+
+# ---------------------------
+# Visualization: Uncertainty Contours via MC Dropout
+# ---------------------------
+
+# Create a grid over the test space for uncertainty visualization
+x_min, x_max = X_test[:, 0].min() - 1, X_test[:, 0].max() + 1
+y_min, y_max = X_test[:, 1].min() - 1, X_test[:, 1].max() + 1
+xx, yy = np.meshgrid(np.arange(x_min, x_max, 0.1),
+                     np.arange(y_min, y_max, 0.1))
 grid = torch.tensor(np.c_[xx.ravel(), yy.ravel()], dtype=torch.float32)
 
-# Obtain Concrete Dropout predictions on the grid via Monte Carlo sampling
-mean_preds_grid, var_preds_grid = concrete_predict(trained_model_cd, grid, num_samples=100)
-# Reshape variance predictions to grid shape
-var_grid = var_preds_grid.reshape(xx.shape).detach().numpy()
+# Get MC dropout predictions on the grid
+grid_preds_mean, grid_preds_variance = mc_dropout_predictions(mc_model, grid, T=T)
+grid_preds_variance = grid_preds_variance.reshape(xx.shape)
 
-# Plot the predictive uncertainty as a contour plot
-plt.figure(figsize=(8, 6))
-contour = plt.contourf(xx, yy, var_grid, cmap='viridis', alpha=0.8)
+# Plot the uncertainty contours and test data
+plt.figure(figsize=(10, 8))
+contour = plt.contourf(xx, yy, grid_preds_variance, alpha=0.6, cmap='viridis')
 plt.colorbar(contour, label='Prediction Variance')
-plt.scatter(X[:, 0].numpy(), X[:, 1].numpy(), c=y.numpy().squeeze(),
-            edgecolor='k', cmap='coolwarm', alpha=0.6)
-plt.title('Concrete Dropout Uncertainty (Variance) Contour Plot')
+plt.scatter(X_test[:, 0].numpy(), X_test[:, 1].numpy(), c=y_test.numpy().squeeze(), edgecolors='k', cmap='viridis')
 plt.xlabel('Feature 1')
 plt.ylabel('Feature 2')
+plt.title('MC Dropout Uncertainty Visualization')
 plt.show()
