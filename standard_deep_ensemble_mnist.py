@@ -113,7 +113,7 @@ def train_ensemble(ensemble_size, epochs=10, lr=0.001, input_dim=784, hidden_dim
 def ensemble_predictions(models, X):
     preds = np.array([torch.softmax(model(X), dim=1).detach().numpy() for model in models])
     preds_mean = preds.mean(axis=0)
-    preds_variance = preds.var(axis=0)
+    preds_variance = preds_mean * (1 - preds_mean)
     return preds_mean, preds_variance
 
 def evaluate_ensemble(models, X, y):
@@ -141,9 +141,11 @@ model_for_features = models[0]
 features = model_for_features.get_features(X_test)  # shape: (N, feature_dim)
 features_np = features.detach().numpy()
 
+from sklearn.manifold import TSNE
+
 # Run PCA to project features to 2D (using PC1 and PC2)
-pca = PCA(n_components=2)
-features_2d = pca.fit_transform(features_np)
+tsne = TSNE(n_components=2, random_state=42)
+features_2d = tsne.fit_transform(features_np)
 
 # ---------------------------
 # Create a grid over the PCA space and interpolate uncertainty
@@ -159,14 +161,26 @@ zi = np.clip(zi, 0, None)
 # ---------------------------
 # Plot the contourf of uncertainty on the PCA plane
 # ---------------------------
-plt.figure(figsize=(12,10))
-contour = plt.contourf(xi, yi, zi, levels=20, cmap='viridis', alpha=0.6)
-plt.colorbar(contour, label='Average Prediction Variance')
-
-# Overlay the PCA points as a scatter plot, colored by their true class labels.
-true_labels = y_test.numpy()
-scatter = plt.scatter(features_2d[:,0], features_2d[:,1], c=true_labels, cmap='jet', edgecolors='k')
-plt.title('PCA Projection of MNIST Test Features (PC1 vs PC2) with Uncertainty Contour')
-plt.xlabel('Principal Component 1')
-plt.ylabel('Principal Component 2')
+plt.figure(figsize=(10, 8))
+plt.scatter(features_2d[:,0], features_2d[:,1], c=y_test.numpy(), cmap='jet', alpha=0.5)
+plt.colorbar(label="Digit Label")
+plt.xlabel("t-SNE Component 1")
+plt.ylabel("t-SNE Component 2")
+plt.title("t-SNE Projection of MNIST Test Features")
+plt.grid(True)
+plt.savefig('t-SNE.png')
 plt.show()
+
+plt.clf()
+
+plt.figure(figsize=(10, 8))
+plt.scatter(features_2d[:,0], features_2d[:,1], c=sample_uncertainty, cmap='plasma', alpha=0.5)
+plt.colorbar(label="Uncertainty (Prediction Variance)")
+plt.xlabel("t-SNE Component 1")
+plt.ylabel("t-SNE Component 2")
+plt.title("Uncertainty Distribution in t-SNE Space")
+plt.grid(True)
+plt.savefig('t-SNE_uncertainty_distribution.png')
+plt.show()
+
+plt.clf()

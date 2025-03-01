@@ -10,6 +10,14 @@ import torch.nn.init as init
 import random
 from torchvision import datasets, transforms
 
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+set_seed(42)
 # ---------------------------
 # Data Generation and Preprocessing (MNIST)
 # ---------------------------
@@ -119,7 +127,7 @@ def mc_dropout_predictions(model, X, T=100):
             preds.append(torch.softmax(model(X), dim=1).detach().numpy())
     preds = np.array(preds)  # (T, N, 10)
     preds_mean = preds.mean(axis=0)
-    preds_variance = preds.var(axis=0)
+    preds_variance = preds_mean * (1 - preds_mean)  # Shape: (N, 10)
     return preds_mean, preds_variance
 
 def evaluate_mc_model(model, X, y, T=100, skip_nll=False):
@@ -143,16 +151,19 @@ sample_uncertainty = test_preds_variance.mean(axis=1)
 
 #Project Features with PCA and Interpolate Uncertainty
 
-from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+
 # Extract hidden features from the test set using the MC dropout model
 features = mc_model.get_features(X_test)  # shape: (N, feature_dim)
 features_np = features.detach().numpy()
 
-# Run PCA to project features to 2D (PC1 and PC2)
-pca = PCA(n_components=2)
-features_2d = pca.fit_transform(features_np)
+print(f"Features Shape: {features_np.shape}")
 
-# Create a grid over the PCA plane
+# Run t-SNE to project features to 2D
+tsne = TSNE(n_components=2, random_state=42)
+features_2d = tsne.fit_transform(features_np)
+
+# Create a grid over the t-SNE plane
 xi = np.linspace(features_2d[:,0].min(), features_2d[:,0].max(), 200)
 yi = np.linspace(features_2d[:,1].min(), features_2d[:,1].max(), 200)
 xi, yi = np.meshgrid(xi, yi)
@@ -162,16 +173,29 @@ zi = griddata((features_2d[:,0], features_2d[:,1]), sample_uncertainty, (xi, yi)
 zi = np.clip(zi, 0, None)  # Ensure non-negative values
 
 # ---------------------------
-# Plot the PCA Projection with Uncertainty Contours
+# Plot the t-SNE Projection with Uncertainty Contours
 # ---------------------------
-plt.figure(figsize=(12,10))
-contour = plt.contourf(xi, yi, zi, levels=20, cmap='viridis', alpha=0.6)
-plt.colorbar(contour, label='Average Prediction Variance')
 
-# Overlay the PCA points as a scatter plot, colored by their true labels.
-true_labels = y_test.numpy()
-plt.scatter(features_2d[:,0], features_2d[:,1], c=true_labels, cmap='jet', edgecolors='k')
-plt.title('PCA Projection (PC1 vs PC2) of MNIST Test Features with Uncertainty Contours')
-plt.xlabel('Principal Component 1')
-plt.ylabel('Principal Component 2')
+plt.figure(figsize=(10, 8))
+plt.scatter(features_2d[:,0], features_2d[:,1], c=y_test.numpy(), cmap='jet', alpha=0.5)
+plt.colorbar(label="Digit Label")
+plt.xlabel("t-SNE Component 1")
+plt.ylabel("t-SNE Component 2")
+plt.title("t-SNE Projection of MNIST Test Features")
+plt.grid(True)
+plt.savefig('t-SNE.png')
 plt.show()
+
+plt.clf()
+
+plt.figure(figsize=(10, 8))
+plt.scatter(features_2d[:,0], features_2d[:,1], c=sample_uncertainty, cmap='plasma', alpha=0.5)
+plt.colorbar(label="Uncertainty (Prediction Variance)")
+plt.xlabel("t-SNE Component 1")
+plt.ylabel("t-SNE Component 2")
+plt.title("Uncertainty Distribution in t-SNE Space")
+plt.grid(True)
+plt.savefig('t-SNE_uncertainty_distribution.png')
+plt.show()
+
+plt.clf()

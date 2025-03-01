@@ -99,7 +99,7 @@ def mc_dropout_predictions(model, X, T=100):
             preds.append(model(X).detach().numpy())
     preds = np.array(preds)  # Shape: (T, N, 1)
     preds_mean = preds.mean(axis=0)
-    preds_variance = preds.var(axis=0)
+    preds_variance = preds_mean * (1 - preds_mean)  # Assuming binary classification
     return preds_mean, preds_variance
 
 # ---------------------------

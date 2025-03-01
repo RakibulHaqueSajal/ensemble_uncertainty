@@ -77,7 +77,12 @@ def initialize_model(model, scheme='xavier_uniform'):
 # Training and Evaluation Functions
 # ---------------------------
 
-def train_model(model, X_train, y_train, epochs=50, lr=0.001):
+def train_model(model, X_train, y_train, epochs=50, lr=0.001, seed=42):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+
     criterion = nn.BCELoss()
     optimizer = optim.Adam(model.parameters(), lr=lr,weight_decay=0.0001)
     model.train()
@@ -109,13 +114,14 @@ init_schemes = ['xavier_uniform', 'xavier_normal', 'kaiming_normal', 'kaiming_un
 def train_ensemble(ensemble_size, epochs=50, lr=0.001, input_dim=2, hidden_dims=[32, 16, 8]):
     ensemble_models = []
     training_metrics = []  # To store final training loss and accuracy for each model
+
     for i in range(ensemble_size):
         model = SimpleNN(input_dim=input_dim, hidden_dims=hidden_dims, output_dim=1)
         chosen_scheme = random.choice(init_schemes)
         # Uncomment the next line to see which initialization scheme is used.
         # print(f"Model {i+1} initialized with: {chosen_scheme}")
         initialize_model(model, scheme=chosen_scheme)
-        trained_model, losses, accuracies = train_model(model, X_train, y_train, epochs=epochs, lr=lr)
+        trained_model, losses, accuracies = train_model(model, X_train, y_train, epochs=epochs, lr=lr, seed=i)
         ensemble_models.append(trained_model)
         training_metrics.append({'final_loss': losses[-1], 'final_accuracy': accuracies[-1]})
        # print(f'Model {i+1} | Init: {chosen_scheme} | Final Training Loss: {losses[-1]:.4f} | Final Training Accuracy: {accuracies[-1]:.4f}')
@@ -124,7 +130,7 @@ def train_ensemble(ensemble_size, epochs=50, lr=0.001, input_dim=2, hidden_dims=
 def ensemble_predictions(models, X):
     preds = np.array([model(X).detach().numpy() for model in models])
     preds_mean = preds.mean(axis=0)
-    preds_variance = preds.var(axis=0)
+    preds_variance = preds_mean * (1 - preds_mean)  # Assuming binary classification
     return preds_mean, preds_variance
 
 def evaluate_ensemble(models, X, y, skip_nll=False):
@@ -180,18 +186,20 @@ axes = axes.flatten()
 for i, n in enumerate(n_ensembles):
     ax = axes[i]
     models, _ = train_ensemble(ensemble_size=n, hidden_dims=hidden_dims)
-    _, _, _, preds_variance = evaluate_ensemble(models, grid, np.zeros(grid.shape[0]), skip_nll=True)
+    
+    # Compute uncertainty over grid points
+    _, preds_variance = ensemble_predictions(models, grid)
     
     # Reshape variance to match grid shape
     preds_variance = preds_variance.reshape(xx.shape)
     
     # Contour plot for uncertainty
     contour = ax.contourf(xx, yy, preds_variance, alpha=0.6, cmap='viridis')
-    fig.colorbar(contour, ax=ax, label='Prediction Variance')
-    
-    # Scatter plot of the test data
+    fig.colorbar(contour, ax=ax, label='Bernoulli Uncertainty')
+
+    # Scatter plot of test data
     ax.scatter(X_test[:, 0], X_test[:, 1], c=y_test.numpy(), edgecolors='k', cmap='viridis')
-    
+
     ax.set_title(f'Ensemble Size: {n}')
     ax.set_xlabel('Feature 1')
     ax.set_ylabel('Feature 2')
